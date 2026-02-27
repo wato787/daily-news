@@ -4,10 +4,17 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 const MY_INTERESTS = "Bun, TypeScript, Cloudflare, Rust, AI, LLM";
 
 export default {
+	async fetch(_request: Request, env: Env, ctx: ExecutionContext) {
+    console.log("HTTPリクエストを受け取ったので、手動でジョブを実行します...");
+    // scheduled 処理をそのまま呼び出す
+    await this.scheduled({} as ScheduledEvent, env, ctx);
+    return new Response("ニュース取得ジョブを実行しました。Discordを確認してください。");
+  },
   // Cron（定期実行）で呼ばれるメイン処理
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+// 2026年現在の無料枠・最新モデル
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     // 1. 各ソースからデータを取得
     const [redditNews, hnNews] = await Promise.all([
