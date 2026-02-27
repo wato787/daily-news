@@ -1,40 +1,88 @@
-/**
- * Welcome to Cloudflare Workers!
- *
- * This is a template for a Scheduled Worker: a Worker that can run on a
- * configurable interval:
- * https://developers.cloudflare.com/workers/platform/triggers/cron-triggers/
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Run `curl "http://localhost:8787/__scheduled?cron=*+*+*+*+*"` to see your Worker in action
- * - Run `npm run deploy` to publish your Worker
- *
- * Bind resources to your Worker in `wrangler.jsonc`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+// 興味のあるトピックをここに記述（プロンプトに組み込まれます）
+const MY_INTERESTS = "Bun, TypeScript, Cloudflare, Rust, AI, LLM";
 
 export default {
-	async fetch(req) {
-		const url = new URL(req.url);
-		url.pathname = '/__scheduled';
-		url.searchParams.append('cron', '* * * * *');
-		return new Response(`To test the scheduled handler, ensure you have used the "--test-scheduled" then try running "curl ${url.href}".`);
-	},
+  // Cron（定期実行）で呼ばれるメイン処理
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-	// The scheduled handler is invoked at the interval set in our wrangler.jsonc's
-	// [[triggers]] configuration.
-	async scheduled(event, env, ctx): Promise<void> {
-		// A Cron Trigger can make requests to other endpoints on the Internet,
-		// publish to a Queue, query a D1 Database, and much more.
-		//
-		// We'll keep it simple and make an API call to a Cloudflare API:
-		let resp = await fetch('https://api.cloudflare.com/client/v4/ips');
-		let wasSuccessful = resp.ok ? 'success' : 'fail';
+    // 1. 各ソースからデータを取得
+    const [redditNews, hnNews] = await Promise.all([
+      fetchReddit(),
+      fetchHackerNews()
+    ]);
 
-		// You could store this result in KV, write to a D1 Database, or publish to a Queue.
-		// In this template, we'll just log the result:
-		console.log(`trigger fired at ${event.cron}: ${wasSuccessful}`);
-	},
-} satisfies ExportedHandler<Env>;
+    const rawNewsList = [...redditNews, ...hnNews].join("\n");
+
+    // 2. Geminiでフィルタリング・日本語化
+    const prompt = `
+      あなたはIT専門のニュースキュレーターです。
+      提供されたニュースリストから、私の興味（${MY_INTERESTS}）に関連するものだけを厳選してください。
+      
+      【ルール】
+      ・興味に合うものがなければ、返信の1行目に「なし」とだけ書いてください。
+      ・あれば1件につき1行で「[ソース] タイトルの日本語訳 (URL)」の形式で出力してください。
+      ・関連性が低いニュースは容赦なく捨ててください。
+      ・最大5件まで。
+
+      【ニュースリスト】
+      ${rawNewsList}
+    `;
+
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text().trim();
+
+    // 3. Discordへ通知（「なし」でない場合のみ）
+    if (!responseText.includes("なし") && responseText.length > 0) {
+      await fetch(env.DISCORD_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: `📅 **本日の厳選ITニュース**\n\n${responseText}`
+        })
+      });
+    }
+  },
+};
+
+// --- ヘルパー関数群 ---
+
+// RedditからJSONで取得
+async function fetchReddit() {
+  try {
+    const resp = await fetch("https://www.reddit.com/r/technology/top.json?limit=10", {
+      headers: { "User-Agent": "MyNewsBot/1.0" }
+    });
+    const json: any = await resp.json();
+    return json.data.children.map((c: any) => `[Reddit] ${c.data.title} - ${c.data.url}`);
+  } catch (e) {
+    console.error("Reddit取得失敗", e);
+    return [];
+  }
+}
+
+// Hacker Newsから最新のTop 10件を取得
+async function fetchHackerNews() {
+  try {
+    const idsResp = await fetch("https://hacker-news.firebaseio.com/v0/topstories.json");
+    const ids = (await idsResp.json() as number[]).slice(0, 10);
+    
+    return await Promise.all(ids.map(async (id) => {
+      const itemResp = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`);
+      const item: any = await itemResp.json();
+      return `[HN] ${item.title} - ${item.url || `https://news.ycombinator.com/item?id=${id}`}`;
+    }));
+  } catch (e) {
+    console.error("HN取得失敗", e);
+    return [];
+  }
+}
+
+// 環境変数の型定義
+interface Env {
+  GEMINI_API_KEY: string;
+  DISCORD_WEBHOOK_URL: string;
+}
