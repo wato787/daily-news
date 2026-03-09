@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { XMLParser } from "fast-xml-parser";
 
 // 興味のあるトピックをここに記述（プロンプトに組み込まれます）
-const MY_INTERESTS = "Bun, TypeScript, Cloudflare, Rust, AI, LLM";
+const MY_INTERESTS = "TypeScript, AI, Frontend, Web,Core Web Vitals,Performance,SEO,Accessibility,Security,Go,AWS,Database,Git";
 
 export default {
 	async fetch(_request: Request, env: Env, ctx: ExecutionContext) {
