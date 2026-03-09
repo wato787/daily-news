@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { XMLParser } from "fast-xml-parser";
 
 // 興味のあるトピックをここに記述（プロンプトに組み込まれます）
 const MY_INTERESTS = "Bun, TypeScript, Cloudflare, Rust, AI, LLM";
@@ -17,12 +18,14 @@ export default {
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     // 1. 各ソースからデータを取得
-    const [redditNews, hnNews] = await Promise.all([
+    const [redditNews, hnNews, zennNews, qiitaNews] = await Promise.all([
       fetchReddit(),
-      fetchHackerNews()
+      fetchHackerNews(),
+      fetchZenn(),
+      fetchQiita()
     ]);
 
-    const rawNewsList = [...redditNews, ...hnNews].join("\n");
+    const rawNewsList = [...redditNews, ...hnNews, ...zennNews, ...qiitaNews].join("\n");
 
     // 2. Geminiでフィルタリング・日本語化
     const prompt = `
@@ -84,6 +87,40 @@ async function fetchHackerNews() {
     }));
   } catch (e) {
     console.error("HN取得失敗", e);
+    return [];
+  }
+}
+
+// ZennのトレンドRSSから取得（先頭10件）
+async function fetchZenn(limit = 10): Promise<string[]> {
+  try {
+    const res = await fetch("https://zenn.dev/feed");
+    const xml = await res.text();
+    const parser = new XMLParser({ ignoreAttributes: false });
+    const doc = parser.parse(xml);
+    const items = doc?.rss?.channel?.item ?? [];
+    const list = Array.isArray(items) ? items : [items];
+    return list.slice(0, limit).map((item: { title?: string; link?: string }) =>
+      `[Zenn] ${item.title ?? ""} - ${item.link ?? ""}`
+    );
+  } catch (e) {
+    console.error("Zenn取得失敗", e);
+    return [];
+  }
+}
+
+// Qiita公式APIから新着記事を取得
+async function fetchQiita(perPage = 10): Promise<string[]> {
+  try {
+    const res = await fetch(
+      `https://qiita.com/api/v2/items?page=1&per_page=${perPage}`,
+      { headers: { "User-Agent": "MyNewsBot/1.0" } }
+    );
+    const items: Array<{ title: string; url: string }> = await res.json();
+    if (!Array.isArray(items)) return [];
+    return items.map((item) => `[Qiita] ${item.title} - ${item.url}`);
+  } catch (e) {
+    console.error("Qiita取得失敗", e);
     return [];
   }
 }

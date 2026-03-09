@@ -1,60 +1,121 @@
-Gemini の回答
-ここまでの議論を踏まえ、**「運用コスト0円・実装最小限・メンテナンスフリー」**に特化した最終設計をまとめました。
+# Zenn / Qiita 対応の検討
 
-🏗️ ITトレンド自動通知システム：最終設計図
-「認証の手間」と「コードの複雑さ」を徹底的に排除した、モダンなサーバーレス構成です。
+## 現状
 
-1. 構成スタック
-コンポーネント	選定ツール	選定理由
-実行基盤	Cloudflare Workers	規約上クリーン、かつ無料枠（1日10万回）が強力。
-ランタイム	Bun (TypeScript)	設定がシンプルで実行が爆速。標準 fetch で完結。
-AIエンジン	Gemini 1.5 Flash	無料枠が広く（1日1500回）、ニュースの選別・翻訳に最適。
-通知先	Discord Webhook	構築が最も簡単。スマホ通知との親和性が高い。
-2. データフロー
-フェッチ (Fetch):
+- **ソース**: Reddit (r/technology), Hacker News の2つのみ
+- **流れ**: `Promise.all` で各 fetch → 1行形式で結合 → Gemini でフィルタ・日本語化 → Discord 通知
+- **形式**: 各ソースは `[ソース名] タイトル - URL` の文字列配列を返す
 
-Reddit: /r/technology/top.json を使用（OAuth認証を回避）。
+## 1. Zenn の追加
 
-Hacker News: Firebase API（認証不要）を使用。
+### 取得方法
 
-集約 (Aggregate):
+- **RSS（推奨）**: 公式フィードを利用する
+  - トレンド全体: `https://zenn.dev/feed`（最新20件）
+  - トピック別: `https://zenn.dev/topics/typescript/feed` など
+- 非公式APIは廃止・不安定のため使わない。
 
-取得したタイトルとURLをプレーンテキストのリストに統合。
+### 実装方針
 
-推論 (Filter & Summarize):
+1. **RSS のパース**
+   - Cloudflare Workers では **fast-xml-parser** が推奨（Fetch ベースで動く）。`rss-parser` は XHR 依存のため Workers では不向き。
+   - 依存追加: `npm i fast-xml-parser`
+   - 流れ: `fetch("https://zenn.dev/feed")` → `text()` → XML パース → `rss.channel.item` から `title` と `link` を取得し、既存と同じ `[Zenn] タイトル - URL` 形式で返す。
 
-Gemini APIへリストを送信。
+2. **RSS の構造（Zenn）**
+   - `<item>` に `<title>`（CDATA）、`<link>` が含まれる。パース結果は `item.title`、`item.link` で参照可能（fast-xml-parser のオプションで CDATA をテキスト化）。
 
-プロンプトに記述された「興味のあるトピック」に基づき、AIが選別・日本語訳を実行。
+3. **件数**
+   - トレンド feed はデフォルト20件。そのまま使うか、先頭 N 件（例: 10）に絞って HN/Reddit とバランスを取る。
 
-通知 (Notify):
+### コード例（イメージ）
 
-AIの回答が「なし」以外の場合のみ、Discord WebhookへPOST。
+```ts
+import { XMLParser } from "fast-xml-parser";
 
-3. フィルタリング仕様（プロンプト駆動）
-コードを書き換えずに挙動を調整できるよう、AIへの指示（プロンプト）でフィルタリングを管理します。
+async function fetchZenn(limit = 10): Promise<string[]> {
+  const res = await fetch("https://zenn.dev/feed");
+  const xml = await res.text();
+  const parser = new XMLParser({ ignoreAttributes: false });
+  const doc = parser.parse(xml);
+  const items = doc?.rss?.channel?.item ?? [];
+  const list = Array.isArray(items) ? items : [items];
+  return list.slice(0, limit).map((item: any) =>
+    `[Zenn] ${item.title ?? ""} - ${item.link ?? ""}`
+  );
+}
+```
 
-Positiveフィルタ: 特定キーワード（例：Rust, Bun, LLM）への合致。
+---
 
-文脈フィルタ: 広告やゴシップを排除し、技術的な進歩やリリース情報のみを抽出。
+## 2. Qiita の追加
 
-整形: [ソース] タイトル (URL) の1行形式に固定。
+### 取得方法（2案）
 
-4. 運用・セキュリティ
-シークレット管理: GEMINI_API_KEY および DISCORD_WEBHOOK_URL は Cloudflare の Secret 機能で暗号化保存し、コード内には記述しない。
+| 方法 | URL | 特徴 |
+|------|-----|------|
+| **A. 公式 API** | `GET https://qiita.com/api/v2/items?page=1&per_page=20` | 安定。認証なしで 60 req/h。`query` で絞り込み可。 |
+| **B. 非公式トレンド** | `https://qiita-api.vercel.app/api/trend` | トレンド一覧がそのまま取れるが、第三者運用のため長期は要検討。 |
 
-スケジュール: Cron Triggers を使用し、毎日午前8時（日本時間）に自動実行。
+### 推奨: 公式 API（A）
 
-ステートレス運用: 複雑さを避けるためDBは持たず、「直近24時間のTop記事」を取得対象とすることで情報の鮮度を保つ。
+- **エンドポイント**: `https://qiita.com/api/v2/items?page=1&per_page=20`
+- **オプション**:
+  - 人気寄りにしたい場合: `query=stocks:>15` や `query=created:>YYYY-MM-DD stocks:>10` など（API の query 構文で絞り込み）。
+  - シンプルに新着: `per_page=20` のみでも可。
+- **レート制限**: 認証なし 60 req/h。Cron が1日1回程度なら問題なし。必要なら `Authorization: Bearer <token>` で 1000 req/h に増やせる。
+- **レスポンス**: JSON。各要素に `title`, `url` があるので、`[Qiita] ${item.title} - ${item.url}` で統一形式にできる。
 
-🛠️ 導入までの最短 3ステップ
-環境準備:
-bun create cloudflare@latest でプロジェクトを作成。
+### 実装方針
 
-APIキー取得:
-Google AI Studio で Gemini のキーを取得し、wrangler secret put で登録。
+1. まずは公式 API のみで実装（`fetchQiita()`）。
+2. User-Agent を付与（`User-Agent: MyNewsBot/1.0`）するとブロックされにくい場合がある。
+3. トレンド API は「トレンドに特化したい」場合の代替案として後から検討可能。
 
-デプロイ:
-前述の TypeScript コードを index.ts に貼り付け、wrangler deploy で完了。
+### コード例（イメージ）
 
-この設計は、「とりあえず動く」状態から「自分好みにAIを調教する」フェーズへスムーズに移行できるのが最大の強みです。
+```ts
+async function fetchQiita(perPage = 10): Promise<string[]> {
+  const res = await fetch(
+    `https://qiita.com/api/v2/items?page=1&per_page=${perPage}`,
+    { headers: { "User-Agent": "MyNewsBot/1.0" } }
+  );
+  const items: Array<{ title: string; url: string }> = await res.json();
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => `[Qiita] ${item.title} - ${item.url}`);
+}
+```
+
+---
+
+## 3. 本番への組み込み
+
+1. **依存**
+   - Zenn: `fast-xml-parser` を追加。
+
+2. **scheduled の変更**
+   - `Promise.all` に `fetchZenn()` と `fetchQiita()` を追加。
+   - 例: `const [redditNews, hnNews, zennNews, qiitaNews] = await Promise.all([...])`
+   - `rawNewsList` に `...zennNews, ...qiitaNews` を結合。
+
+3. **プロンプト**
+   - 既存の「ソース」に Zenn / Qiita が含まれるだけなので、プロンプトのルール（1行1件・最大5件など）はそのままでよい。必要なら「日本語の記事はそのまま、英語は日本語訳」などと明示してもよい。
+
+4. **エラー耐性**
+   - 既存と同様、各 fetch を try/catch で囲み、失敗時は `[]` を返して他ソースの結果だけで続行。
+
+5. **件数バランス**
+   - 4ソースになるとリストが長くなるので、各ソース 5〜10 件に抑えると Gemini の入力も安定する。
+
+---
+
+## 4. まとめ
+
+| 項目 | Zenn | Qiita |
+|------|------|-------|
+| 取得方法 | 公式 RSS `https://zenn.dev/feed` | 公式 API `GET /api/v2/items` |
+| パース | fast-xml-parser で XML → item.title / item.link | JSON の title / url |
+| 新規依存 | fast-xml-parser | なし |
+| レート制限 | 特になし（RSS） | 60/h（未認証） |
+
+この方針で `fetchZenn` と `fetchQiita` を追加し、既存の `fetchReddit` / `fetchHackerNews` と同様に `scheduled` 内の `Promise.all` と `rawNewsList` に組み込めば、Zenn と Qiita に対応できる。
